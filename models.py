@@ -36,6 +36,14 @@ class User:
             cursor.execute(query, (email,))
             result = cursor.fetchone()
             return result['count'] > 0
+    
+    @staticmethod
+    def get_all_chiefs():
+        """Get all users with chief role"""
+        with get_db_cursor() as cursor:
+            query = "SELECT id, name, email, image_url, role, created_at FROM users WHERE role = 'chief'"
+            cursor.execute(query)
+            return cursor.fetchall()
 
 
 class LoginHistory:

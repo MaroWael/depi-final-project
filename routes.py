@@ -159,17 +159,27 @@ async def login(login_data: LoginRequest, request: Request):
         )
     )
 
-@router.get("/images/{filename}")
-async def get_image(filename: str):
+
+@router.get("/chiefs")
+async def get_all_chiefs(current_admin: dict = Depends(get_current_admin)):
     """
-    Serve uploaded user images
+    Get all chiefs (Admin only).
+    Returns a list of all users with the 'chief' role.
+    Non-admin users will receive an access denied error.
     """
-    image_path = IMAGES_DIR / filename
+    chiefs = User.get_all_chiefs()
     
-    if not image_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Image not found"
-        )
-    
-    return FileResponse(image_path)
+    return {
+        "chiefs": [
+            UserResponse(
+                id=chief["id"],
+                name=chief["name"],
+                email=chief["email"],
+                image_url=chief["image_url"],
+                role=chief["role"],
+                created_at=chief["created_at"]
+            )
+            for chief in chiefs
+        ],
+        "total": len(chiefs)
+    }
