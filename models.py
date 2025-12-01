@@ -44,6 +44,55 @@ class User:
             query = "SELECT id, name, email, image_url, role, created_at FROM users WHERE role = 'chief'"
             cursor.execute(query)
             return cursor.fetchall()
+    
+    @staticmethod
+    def update(user_id: int, name: str = None, email: str = None, password: str = None, image_url: str = None, role: str = None):
+        """Update user information"""
+        with get_db_cursor() as cursor:
+            # Build dynamic update query
+            updates = []
+            params = []
+            
+            if name is not None:
+                updates.append("name = %s")
+                params.append(name)
+            if email is not None:
+                updates.append("email = %s")
+                params.append(email)
+            if password is not None:
+                updates.append("password = %s")
+                params.append(password)
+            if image_url is not None:
+                updates.append("image_url = %s")
+                params.append(image_url)
+            if role is not None:
+                updates.append("role = %s")
+                params.append(role)
+            
+            if not updates:
+                return False
+            
+            params.append(user_id)
+            query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
+            cursor.execute(query, params)
+            return cursor.rowcount > 0
+    
+    @staticmethod
+    def delete(user_id: int):
+        """Delete a user"""
+        with get_db_cursor() as cursor:
+            query = "DELETE FROM users WHERE id = %s"
+            cursor.execute(query, (user_id,))
+            return cursor.rowcount > 0
+    
+    @staticmethod
+    def email_exists_excluding_user(email: str, user_id: int) -> bool:
+        """Check if email exists for other users (used during update)"""
+        with get_db_cursor() as cursor:
+            query = "SELECT COUNT(*) as count FROM users WHERE email = %s AND id != %s"
+            cursor.execute(query, (email, user_id))
+            result = cursor.fetchone()
+            return result['count'] > 0
 
 
 class LoginHistory:

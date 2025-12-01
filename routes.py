@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
-from schemas import SignupRequest, LoginRequest, LoginResponse, UserResponse
+from schemas import SignupRequest, LoginRequest, LoginResponse, UserResponse, UpdateUserRequest
 from models import User, LoginHistory
-from auth import hash_password, verify_password, create_access_token, get_current_admin
+from auth import hash_password, verify_password, create_access_token, get_current_admin, get_current_user
 from datetime import datetime
 import os
 import uuid
@@ -182,4 +182,166 @@ async def get_all_chiefs(current_admin: dict = Depends(get_current_admin)):
             for chief in chiefs
         ],
         "total": len(chiefs)
+    }
+
+@router.put("/user/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: int,
+    name: str = Form(None),
+    email: str = Form(None),
+    password: str = Form(None),
+    role: str = Form(None),
+    image: UploadFile = File(None),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Update user information (Admin only).
+    All fields are optional. Only provided fields will be updated.
+    """
+    # Check if user exists
+    user = User.get_by_id(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Validate role if provided
+    if role and role not in ["admin", "chief"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role must be either 'admin' or 'chief'"
+        )
+    
+    # Validate password length if provided
+    if password and len(password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters long"
+        )
+    
+    # Check if email is being changed and if it already exists
+    if email and email != user["email"]:
+        if User.email_exists_excluding_user(email, user_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already in use by another user"
+            )
+    
+    # Handle image upload if provided
+    new_image_url = None
+    if image:
+        allowed_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+        file_ext = os.path.splitext(image.filename)[1].lower()
+        
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid image format. Allowed formats: {', '.join(allowed_extensions)}"
+            )
+        
+        # Generate unique filename
+        unique_filename = f"{uuid.uuid4()}{file_ext}"
+        image_path = IMAGES_DIR / unique_filename
+        
+        # Save new image file
+        try:
+            with open(image_path, "wb") as buffer:
+                content = await image.read()
+                buffer.write(content)
+            new_image_url = unique_filename
+            
+            # Delete old image if exists
+            if user["image_url"]:
+                old_image_path = IMAGES_DIR / user["image_url"]
+                if old_image_path.exists():
+                    os.remove(old_image_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to save image: {str(e)}"
+            )
+    
+    # Hash password if provided
+    hashed_password = hash_password(password) if password else None
+    
+    # Update user
+    try:
+        User.update(
+            user_id=user_id,
+            name=name,
+            email=email,
+            password=hashed_password,
+            image_url=new_image_url,
+            role=role
+        )
+    except Exception as e:
+        # Delete new image if update fails
+        if new_image_url:
+            new_image_path = IMAGES_DIR / new_image_url
+            if new_image_path.exists():
+                os.remove(new_image_path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update user: {str(e)}"
+        )
+    
+    # Get updated user
+    updated_user = User.get_by_id(user_id)
+    
+    return UserResponse(
+        id=updated_user["id"],
+        name=updated_user["name"],
+        email=updated_user["email"],
+        image_url=updated_user["image_url"],
+        role=updated_user["role"],
+        created_at=updated_user["created_at"]
+    )
+
+@router.delete("/user/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Delete a user (Admin only).
+    This will also delete the user's image and login history (cascade).
+    """
+    # Check if user exists
+    user = User.get_by_id(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Prevent admin from deleting themselves
+    if user_id == current_admin["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own account"
+        )
+    
+    # Delete user's image if exists
+    if user["image_url"]:
+        image_path = IMAGES_DIR / user["image_url"]
+        if image_path.exists():
+            try:
+                os.remove(image_path)
+            except Exception as e:
+                print(f"Warning: Failed to delete image: {e}")
+    
+    # Delete user from database
+    try:
+        User.delete(user_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user: {str(e)}"
+        )
+    
+    return {
+        "message": "User deleted successfully",
+        "user_id": user_id,
+        "email": user["email"]
     }

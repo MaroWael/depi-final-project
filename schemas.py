@@ -35,3 +35,9 @@ class TokenData(BaseModel):
     user_id: int
     email: str
     role: str
+
+class UpdateUserRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(None, min_length=6)
+    role: Optional[UserRole] = None
