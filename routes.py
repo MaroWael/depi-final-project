@@ -345,3 +345,26 @@ async def delete_user(
         "user_id": user_id,
         "email": user["email"]
     }
+
+@router.get("/images/{filename}")
+async def get_user_image(filename: str):
+    """
+    Serve user profile images.
+    Public endpoint - no authentication required.
+    """
+    image_path = IMAGES_DIR / filename
+    
+    if not image_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image not found"
+        )
+    
+    # Check if it's actually a file (security)
+    if not image_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invalid image path"
+        )
+    
+    return FileResponse(image_path)
