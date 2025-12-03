@@ -1,0 +1,6 @@
+===== VIDEO ANALYSIS REPORT =====
+Date: 2025-12-03 19:37:26
+Video: videos\8cd1babd-1a63-4a6f-bf28-0ed4a9a9b8a6.mp4
+Total Frames Processed: 390
+------------------------------
+eating: count = 41, avg confidence = 0.761

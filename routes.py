@@ -1,18 +1,40 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
-from schemas import SignupRequest, LoginRequest, LoginResponse, UserResponse, UpdateUserRequest
-from models import User, LoginHistory
+from schemas import SignupRequest, LoginRequest, LoginResponse, UserResponse, UpdateUserRequest, VideoReportResponse
+from models import User, LoginHistory, VideoReport
 from auth import hash_password, verify_password, create_access_token, get_current_admin, get_current_user
 from datetime import datetime
 import os
 import uuid
 from pathlib import Path
+import cv2
+from PIL import Image
+from inference_sdk import InferenceHTTPClient
+from collections import defaultdict
+import json
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 # Create images directory if it doesn't exist
 IMAGES_DIR = Path("images")
 IMAGES_DIR.mkdir(exist_ok=True)
+
+# Create videos directory if it doesn't exist
+VIDEOS_DIR = Path("videos")
+VIDEOS_DIR.mkdir(exist_ok=True)
+
+# -----------------------------
+# API & MODEL CONFIG
+# -----------------------------
+MODEL_ID = "saldjs-eodej/1"
+API_KEY = "f50xHu5kMJ54A1ERJdnX"
+FRAME_SKIP = 5
+RESIZE_DIM = (640, 640)
+
+CLIENT = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=API_KEY
+)
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
@@ -360,11 +382,144 @@ async def get_user_image(filename: str):
             detail="Image not found"
         )
     
-    # Check if it's actually a file (security)
     if not image_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invalid image path"
         )
-    
+
     return FileResponse(image_path)
+
+@router.post("/analyze-video", response_model=VideoReportResponse)
+async def analyze_video(
+    video: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upload a video, analyze it using Roboflow Inference, and return a report.
+    """
+
+    # -----------------------------
+    # 1. Save Uploaded Video
+    # -----------------------------
+    allowed_extensions = {".mp4", ".avi", ".mov", ".mkv"}
+    file_ext = os.path.splitext(video.filename)[1].lower()
+
+    if file_ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Invalid video format")
+
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+    video_path = VIDEOS_DIR / unique_filename
+
+    try:
+        with open(video_path, "wb") as buffer:
+            buffer.write(await video.read())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save video: {e}")
+
+    # -----------------------------
+    # 2. Run Video Analysis
+    # -----------------------------
+    cap = cv2.VideoCapture(str(video_path))
+    frame_count = 0
+    
+    # Initialize stats for specific behaviors
+    target_behaviors = ["eating", "face_touching", "smoking"]
+    behavior_stats = {behavior: {"count": 0, "confidence_sum": 0.0} for behavior in target_behaviors}
+    
+    # Use defaultdict for any other unexpected behaviors
+    other_stats = defaultdict(lambda: {"count": 0, "confidence_sum": 0.0})
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_count += 1
+
+            # Skip frames for performance
+            if frame_count % FRAME_SKIP != 0:
+                continue
+
+            # Resize for model
+            frame_resized = cv2.resize(frame, RESIZE_DIM)
+            frame_pil = Image.fromarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
+
+            try:
+                result = CLIENT.infer(frame_pil, model_id=MODEL_ID)
+                predictions = result.get("predictions", [])
+            except Exception as e:
+                print(f"Error at frame {frame_count}: {e}")
+                continue
+
+            # Collect statistics
+            for pred in predictions:
+                label = pred.get("class")
+                conf = pred.get("confidence", 0.0)
+                
+                if label:
+                    # Normalize label (handle potential variations)
+                    normalized_label = label.lower().replace("-", "_").replace(" ", "_")
+                    
+                    if normalized_label in behavior_stats:
+                        behavior_stats[normalized_label]["count"] += 1
+                        behavior_stats[normalized_label]["confidence_sum"] += conf
+                    else:
+                        # Store other detections if needed, or map them
+                        # For now, we'll track them in other_stats
+                        other_stats[label]["count"] += 1
+                        other_stats[label]["confidence_sum"] += conf
+
+    finally:
+        cap.release()
+
+    # -----------------------------
+    # 3. Prepare Final Stats
+    # -----------------------------
+    final_stats = {}
+    
+    # Process target behaviors
+    for behavior, stats in behavior_stats.items():
+        count = stats["count"]
+        avg_conf = round(stats["confidence_sum"] / count, 3) if count > 0 else 0.0
+        is_present = count >= 1
+        
+        final_stats[behavior] = {
+            "count": count,
+            "average_confidence": avg_conf,
+            "detected": is_present
+        }
+        
+    # Add other behaviors if any (optional, but good for debugging)
+    for behavior, stats in other_stats.items():
+        count = stats["count"]
+        avg_conf = round(stats["confidence_sum"] / count, 3) if count > 0 else 0.0
+        is_present = count >= 1
+        
+        final_stats[behavior] = {
+            "count": count,
+            "average_confidence": avg_conf,
+            "detected": is_present
+        }
+
+    final_stats["total_frames_processed"] = frame_count
+
+    # -----------------------------
+    # 4. Save to DB
+    # -----------------------------
+    report_json = json.dumps(final_stats)
+    report_id = VideoReport.create(unique_filename, report_json)
+    report = VideoReport.get_by_id(report_id)
+
+    # If DB stored string → convert to dict
+    report_data = report["report_data"]
+    if isinstance(report_data, str):
+        report_data = json.loads(report_data)
+
+    return {
+        "id": report["id"],
+        "video_filename": report["video_filename"],
+        "report_data": report_data,
+        "created_at": report["created_at"]
+    }

@@ -41,3 +41,10 @@ class UpdateUserRequest(BaseModel):
     email: Optional[EmailStr] = None
     password: Optional[str] = Field(None, min_length=6)
     role: Optional[UserRole] = None
+
+class VideoReportResponse(BaseModel):
+    id: int
+    video_filename: str
+    report_data: dict
+    created_at: datetime
+

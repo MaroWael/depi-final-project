@@ -76,7 +76,7 @@ class User:
             query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
             cursor.execute(query, params)
             return cursor.rowcount > 0
-    
+
     @staticmethod
     def delete(user_id: int):
         """Delete a user"""
@@ -93,6 +93,34 @@ class User:
             cursor.execute(query, (email, user_id))
             result = cursor.fetchone()
             return result['count'] > 0
+
+class VideoReport:
+    @staticmethod
+    def create(video_filename: str, report_data: str):
+        """Create a new video report"""
+        with get_db_cursor() as cursor:
+            query = """
+                INSERT INTO video_reports (video_filename, report_data)
+                VALUES (%s, %s)
+            """
+            cursor.execute(query, (video_filename, report_data))
+            return cursor.lastrowid
+
+    @staticmethod
+    def get_all():
+        """Get all video reports"""
+        with get_db_cursor() as cursor:
+            query = "SELECT * FROM video_reports ORDER BY created_at DESC"
+            cursor.execute(query)
+            return cursor.fetchall()
+
+    @staticmethod
+    def get_by_id(report_id: int):
+        """Get video report by ID"""
+        with get_db_cursor() as cursor:
+            query = "SELECT * FROM video_reports WHERE id = %s"
+            cursor.execute(query, (report_id,))
+            return cursor.fetchone()
 
 
 class LoginHistory:

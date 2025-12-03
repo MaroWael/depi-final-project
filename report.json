@@ -1,0 +1,12 @@
+{
+    "timestamp": "2025-12-03T19:37:26.725338",
+    "video_path": "videos\\8cd1babd-1a63-4a6f-bf28-0ed4a9a9b8a6.mp4",
+    "total_frames_processed": 390,
+    "model_id": "saldjs-eodej/1",
+    "behaviors": {
+        "eating": {
+            "count": 41,
+            "average_confidence": 0.761
+        }
+    }
+}

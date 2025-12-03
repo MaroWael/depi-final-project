@@ -67,6 +67,16 @@ def init_database():
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         """)
+
+        # Create video_reports table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS video_reports (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                video_filename VARCHAR(255) NOT NULL,
+                report_data JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         connection.commit()
         print("Database tables created successfully")
