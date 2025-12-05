@@ -77,6 +77,42 @@ except Exception as e:
     traceback.print_exc()
     CLEANING_SESSION = None
 
+# Initialize ONNX PPE Model
+PPE_MODEL_PATH = "ppe.onnx"
+PPE_SESSION = None
+PPE_INPUT = None
+PPE_CLASSES = ["Apron", "Glove", "Hairnet"]
+
+try:
+    if not os.path.exists(PPE_MODEL_PATH):
+        print(f"❌ ONNX model file not found at: {PPE_MODEL_PATH}")
+    else:
+        print(f"✓ ONNX model file found at: {PPE_MODEL_PATH}")
+        file_size = os.path.getsize(PPE_MODEL_PATH)
+        print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
+        
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        PPE_SESSION = ort.InferenceSession(
+            PPE_MODEL_PATH, 
+            sess_options=session_options,
+            providers=["CPUExecutionProvider"]
+        )
+        PPE_INPUT = PPE_SESSION.get_inputs()[0].name
+        
+        # Print model info
+        input_shape = PPE_SESSION.get_inputs()[0].shape
+        output_shape = PPE_SESSION.get_outputs()[0].shape
+        print(f"✓ ONNX PPE Model loaded successfully")
+        print(f"  Input name: {PPE_INPUT}, shape: {input_shape}")
+        print(f"  Output shape: {output_shape}")
+except Exception as e:
+    print(f"❌ Warning: Failed to load ONNX PPE model: {e}")
+    print("The application will continue without PPE detection.")
+    import traceback
+    traceback.print_exc()
+    PPE_SESSION = None
+
 def run_cleaning_onnx(frame_bgr):
     """
     Run ONNX Runtime inference on a BGR frame and return detections.
@@ -215,6 +251,114 @@ def run_cleaning_onnx(frame_bgr):
         return detections
     except Exception as e:
         print(f"[ONNX] Error in run_cleaning_onnx: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def run_ppe_onnx(frame_bgr):
+    """
+    Run ONNX Runtime inference on a BGR frame and return detections for PPE.
+    """
+    if PPE_SESSION is None:
+        return []
+    
+    try:
+        # Get original frame dimensions
+        orig_h, orig_w = frame_bgr.shape[:2]
+        
+        # -----------------------------
+        # 1. Letterbox Preprocessing
+        # -----------------------------
+        scale = min(640 / orig_w, 640 / orig_h)
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        img_resized = cv2.resize(frame_bgr, (new_w, new_h))
+        canvas = np.full((640, 640, 3), 114, dtype=np.uint8)
+        dw = (640 - new_w) // 2
+        dh = (640 - new_h) // 2
+        canvas[dh:dh+new_h, dw:dw+new_w] = img_resized
+        
+        # -----------------------------
+        # 2. Prepare for Model
+        # -----------------------------
+        img = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))
+        img = np.expand_dims(img, axis=0)
+        
+        # Run inference
+        outputs = PPE_SESSION.run(None, {PPE_INPUT: img})
+        
+        # Parse YOLOv8 output
+        output = outputs[0]
+        if len(output.shape) == 3:
+            output = output[0].T
+        
+        # -----------------------------
+        # 3. Process Detections
+        # -----------------------------
+        boxes = []
+        scores = []
+        class_ids = []
+        
+        for detection in output:
+            class_scores = detection[4:]
+            cls_id = int(np.argmax(class_scores))
+            confidence = float(class_scores[cls_id])
+            
+            if confidence > CONFIDENCE_THRESHOLD:
+                x_center, y_center, width, height = detection[:4]
+                x = x_center - width / 2
+                y = y_center - height / 2
+                boxes.append([x, y, width, height])
+                scores.append(confidence)
+                class_ids.append(cls_id)
+        
+        # -----------------------------
+        # 4. Class-Aware NMS
+        # -----------------------------
+        nms_boxes = []
+        max_wh = 4096
+        for i, box in enumerate(boxes):
+            x, y, w, h = box
+            c = class_ids[i]
+            nms_boxes.append([x + c * max_wh, y + c * max_wh, w, h])
+            
+        indices = cv2.dnn.NMSBoxes(
+            nms_boxes, 
+            scores, 
+            score_threshold=CONFIDENCE_THRESHOLD,
+            nms_threshold=0.7
+        )
+        
+        detections = []
+        if len(indices) > 0:
+            for i in indices.flatten():
+                x, y, w, h = boxes[i]
+                x -= dw
+                y -= dh
+                x /= scale
+                y /= scale
+                w /= scale
+                h /= scale
+                x1 = int(x)
+                y1 = int(y)
+                x2 = int(x + w)
+                y2 = int(y + h)
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(orig_w, x2)
+                y2 = min(orig_h, y2)
+                
+                detections.append({
+                    "cls": class_ids[i],
+                    "score": scores[i],
+                    "bbox": [x1, y1, x2, y2]
+                })
+        
+        return detections
+    except Exception as e:
+        print(f"[ONNX] Error in run_ppe_onnx: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -855,6 +999,114 @@ async def analyze_cleaning(
     report = VideoReport.get_by_id(report_id)
 
     # If DB stored string → convert to dict
+    report_data = report["report_data"]
+    if isinstance(report_data, str):
+        report_data = json.loads(report_data)
+
+    return {
+        "id": report["id"],
+        "video_filename": report["video_filename"],
+        "report_data": report_data,
+        "created_at": report["created_at"]
+    }
+
+# -----------------------------
+# /analyze-ppe route (ONNX-based)
+# -----------------------------
+@router.post("/analyze-ppe", response_model=VideoReportResponse)
+async def analyze_ppe(
+    video: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upload a video and analyze PPE compliance using ONNX model.
+    Detects: Apron, Glove, Hairnet
+    """
+    if PPE_SESSION is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PPE detection model is not available"
+        )
+
+    # 1. Save Uploaded Video
+    allowed_extensions = {".mp4", ".avi", ".mov", ".mkv"}
+    file_ext = os.path.splitext(video.filename)[1].lower()
+
+    if file_ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Invalid video format")
+
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+    video_path = VIDEOS_DIR / unique_filename
+
+    try:
+        with open(video_path, "wb") as buffer:
+            buffer.write(await video.read())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save video: {e}")
+
+    # 2. Run PPE Analysis
+    cap = cv2.VideoCapture(str(video_path))
+    frame_count = 0
+
+    class_counts = defaultdict(int)
+    class_confidences = defaultdict(float)
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_count += 1
+
+            if frame_count % FRAME_SKIP_CLEANING != 0:
+                continue
+
+            try:
+                detections = run_ppe_onnx(frame)
+
+                for det in detections:
+                    cls_id = det["cls"]
+                    conf = det["score"]
+                    
+                    if 0 <= cls_id < len(PPE_CLASSES):
+                        cls_name = PPE_CLASSES[cls_id]
+                        class_counts[cls_name] += 1
+                        class_confidences[cls_name] += conf
+
+            except Exception as e:
+                print(f"ONNX PPE model error at frame {frame_count}: {e}")
+
+    finally:
+        cap.release()
+
+    # 3. Prepare Final Stats
+    final_stats = {}
+
+    for cls_name in PPE_CLASSES:
+        count = class_counts[cls_name]
+        conf = class_confidences[cls_name]
+        avg_conf = round(conf / count, 3) if count > 0 else 0.0
+        
+        is_detected = count > 0
+        
+        # Special condition for Hairnet: if average confidence < 0.5, consider it not detected
+        if cls_name == "Hairnet" and avg_conf < 0.5:
+            is_detected = False
+
+        final_stats[cls_name] = {
+            "count": count,
+            "average_confidence": avg_conf,
+            "detected": is_detected
+        }
+
+    final_stats["total_frames_processed"] = frame_count
+
+    # 4. Save to DB
+    report_json = json.dumps(final_stats)
+    report_id = VideoReport.create(unique_filename, report_json)
+    report = VideoReport.get_by_id(report_id)
+
     report_data = report["report_data"]
     if isinstance(report_data, str):
         report_data = json.loads(report_data)
