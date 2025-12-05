@@ -5,6 +5,7 @@ WORKDIR /app
 # Install system dependencies required for OpenCV
 # opencv-python-headless usually doesn't need libgl1, but libglib2.0-0 is often required
 RUN apt-get update && apt-get install -y \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
