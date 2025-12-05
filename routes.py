@@ -45,52 +45,83 @@ CLEANING_INPUT = None
 CLEAN_CLASSES = ["clean_surface", "dirty_surface", "Rats", "Insects"]
 
 try:
-    session_options = ort.SessionOptions()
-    session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    CLEANING_SESSION = ort.InferenceSession(
-        CLEANING_MODEL_PATH, 
-        sess_options=session_options,
-        providers=["CPUExecutionProvider"]
-    )
-    CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
-    print("✓ ONNX Cleaning Model loaded successfully")
+    import os
+    if not os.path.exists(CLEANING_MODEL_PATH):
+        print(f"❌ ONNX model file not found at: {CLEANING_MODEL_PATH}")
+        print(f"Current directory: {os.getcwd()}")
+        print(f"Files in current directory: {os.listdir('.')}")
+    else:
+        print(f"✓ ONNX model file found at: {CLEANING_MODEL_PATH}")
+        file_size = os.path.getsize(CLEANING_MODEL_PATH)
+        print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
+        
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        CLEANING_SESSION = ort.InferenceSession(
+            CLEANING_MODEL_PATH, 
+            sess_options=session_options,
+            providers=["CPUExecutionProvider"]
+        )
+        CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
+        
+        # Print model info
+        input_shape = CLEANING_SESSION.get_inputs()[0].shape
+        output_shape = CLEANING_SESSION.get_outputs()[0].shape
+        print(f"✓ ONNX Cleaning Model loaded successfully")
+        print(f"  Input name: {CLEANING_INPUT}, shape: {input_shape}")
+        print(f"  Output shape: {output_shape}")
 except Exception as e:
-    print(f"Warning: Failed to load ONNX cleaning model: {e}")
+    print(f"❌ Warning: Failed to load ONNX cleaning model: {e}")
     print("The application will continue without cleaning surface detection.")
+    import traceback
+    traceback.print_exc()
     CLEANING_SESSION = None
 
 def run_cleaning_onnx(frame_bgr):
-    img = cv2.resize(frame_bgr, (640, 640))
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = np.expand_dims(img, axis=0)
-    outputs = CLEANING_SESSION.run(None, {CLEANING_INPUT: img})
-    
-    # YOLOv8 ONNX output format: (1, 8, 8400) for 4 classes
-    # Format: [x, y, w, h, class0_conf, class1_conf, class2_conf, class3_conf]
-    output = outputs[0]
-    
-    # Transpose to (8400, 8) if needed
-    if len(output.shape) == 3:
-        output = output[0].T  # (8, 8400) -> (8400, 8)
-    
-    detections = []
-    
-    for detection in output:
-        # First 4 values are box coordinates (x, y, w, h)
-        # Remaining values are class confidences
-        class_scores = detection[4:]
+    try:
+        img = cv2.resize(frame_bgr, (640, 640))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))
+        img = np.expand_dims(img, axis=0)
         
-        # Get the class with max confidence
-        cls_id = int(np.argmax(class_scores))
-        confidence = float(class_scores[cls_id])
+        print(f"[ONNX] Input shape: {img.shape}, dtype: {img.dtype}")
         
-        # Filter by confidence threshold
-        if confidence > 0.25:  # Lower threshold for better detection
-            detections.append({"cls": cls_id, "score": confidence})
-    
-    return detections
+        outputs = CLEANING_SESSION.run(None, {CLEANING_INPUT: img})
+        
+        # YOLOv8 ONNX output format: (1, 8, 8400) for 4 classes
+        # Format: [x, y, w, h, class0_conf, class1_conf, class2_conf, class3_conf]
+        output = outputs[0]
+        
+        print(f"[ONNX] Output shape: {output.shape}, dtype: {output.dtype}")
+        
+        # Transpose to (8400, 8) if needed
+        if len(output.shape) == 3:
+            output = output[0].T  # (8, 8400) -> (8400, 8)
+        
+        detections = []
+        
+        for detection in output:
+            # First 4 values are box coordinates (x, y, w, h)
+            # Remaining values are class confidences
+            class_scores = detection[4:]
+            
+            # Get the class with max confidence
+            cls_id = int(np.argmax(class_scores))
+            confidence = float(class_scores[cls_id])
+            
+            # Filter by confidence threshold
+            if confidence > 0.25:  # Lower threshold for better detection
+                detections.append({"cls": cls_id, "score": confidence})
+        
+        print(f"[ONNX] Found {len(detections)} detections above threshold")
+        
+        return detections
+    except Exception as e:
+        print(f"[ONNX] Error in run_cleaning_onnx: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
