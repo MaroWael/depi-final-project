@@ -44,38 +44,46 @@ CLEANING_SESSION = None
 CLEANING_INPUT = None
 CLEAN_CLASSES = ["clean_surface", "dirty_surface", "Rats", "Insects"]
 
-try:
-    import os
-    if not os.path.exists(CLEANING_MODEL_PATH):
-        print(f"❌ ONNX model file not found at: {CLEANING_MODEL_PATH}")
-        print(f"Current directory: {os.getcwd()}")
-        print(f"Files in current directory: {os.listdir('.')}")
-    else:
-        print(f"✓ ONNX model file found at: {CLEANING_MODEL_PATH}")
-        file_size = os.path.getsize(CLEANING_MODEL_PATH)
-        print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
+def get_cleaning_session():
+    global CLEANING_SESSION, CLEANING_INPUT
+    if CLEANING_SESSION is not None:
+        return CLEANING_SESSION, CLEANING_INPUT
         
-        session_options = ort.SessionOptions()
-        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        CLEANING_SESSION = ort.InferenceSession(
-            CLEANING_MODEL_PATH, 
-            sess_options=session_options,
-            providers=["CPUExecutionProvider"]
-        )
-        CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
-        
-        # Print model info
-        input_shape = CLEANING_SESSION.get_inputs()[0].shape
-        output_shape = CLEANING_SESSION.get_outputs()[0].shape
-        print(f"✓ ONNX Cleaning Model loaded successfully")
-        print(f"  Input name: {CLEANING_INPUT}, shape: {input_shape}")
-        print(f"  Output shape: {output_shape}")
-except Exception as e:
-    print(f"❌ Warning: Failed to load ONNX cleaning model: {e}")
-    print("The application will continue without cleaning surface detection.")
-    import traceback
-    traceback.print_exc()
-    CLEANING_SESSION = None
+    try:
+        import os
+        if not os.path.exists(CLEANING_MODEL_PATH):
+            print(f"❌ ONNX model file not found at: {CLEANING_MODEL_PATH}")
+            print(f"Current directory: {os.getcwd()}")
+            print(f"Files in current directory: {os.listdir('.')}")
+            return None, None
+        else:
+            print(f"✓ ONNX model file found at: {CLEANING_MODEL_PATH}")
+            file_size = os.path.getsize(CLEANING_MODEL_PATH)
+            print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
+            
+            session_options = ort.SessionOptions()
+            session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            CLEANING_SESSION = ort.InferenceSession(
+                CLEANING_MODEL_PATH, 
+                sess_options=session_options,
+                providers=["CPUExecutionProvider"]
+            )
+            CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
+            
+            # Print model info
+            input_shape = CLEANING_SESSION.get_inputs()[0].shape
+            output_shape = CLEANING_SESSION.get_outputs()[0].shape
+            print(f"✓ ONNX Cleaning Model loaded successfully")
+            print(f"  Input name: {CLEANING_INPUT}, shape: {input_shape}")
+            print(f"  Output shape: {output_shape}")
+            return CLEANING_SESSION, CLEANING_INPUT
+    except Exception as e:
+        print(f"❌ Warning: Failed to load ONNX cleaning model: {e}")
+        print("The application will continue without cleaning surface detection.")
+        import traceback
+        traceback.print_exc()
+        CLEANING_SESSION = None
+        return None, None
 
 # Initialize ONNX PPE Model
 PPE_MODEL_PATH = "ppe.onnx"
@@ -83,35 +91,43 @@ PPE_SESSION = None
 PPE_INPUT = None
 PPE_CLASSES = ["Apron", "Glove", "Hairnet"]
 
-try:
-    if not os.path.exists(PPE_MODEL_PATH):
-        print(f"❌ ONNX model file not found at: {PPE_MODEL_PATH}")
-    else:
-        print(f"✓ ONNX model file found at: {PPE_MODEL_PATH}")
-        file_size = os.path.getsize(PPE_MODEL_PATH)
-        print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
-        
-        session_options = ort.SessionOptions()
-        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        PPE_SESSION = ort.InferenceSession(
-            PPE_MODEL_PATH, 
-            sess_options=session_options,
-            providers=["CPUExecutionProvider"]
-        )
-        PPE_INPUT = PPE_SESSION.get_inputs()[0].name
-        
-        # Print model info
-        input_shape = PPE_SESSION.get_inputs()[0].shape
-        output_shape = PPE_SESSION.get_outputs()[0].shape
-        print(f"✓ ONNX PPE Model loaded successfully")
-        print(f"  Input name: {PPE_INPUT}, shape: {input_shape}")
-        print(f"  Output shape: {output_shape}")
-except Exception as e:
-    print(f"❌ Warning: Failed to load ONNX PPE model: {e}")
-    print("The application will continue without PPE detection.")
-    import traceback
-    traceback.print_exc()
-    PPE_SESSION = None
+def get_ppe_session():
+    global PPE_SESSION, PPE_INPUT
+    if PPE_SESSION is not None:
+        return PPE_SESSION, PPE_INPUT
+
+    try:
+        if not os.path.exists(PPE_MODEL_PATH):
+            print(f"❌ ONNX model file not found at: {PPE_MODEL_PATH}")
+            return None, None
+        else:
+            print(f"✓ ONNX model file found at: {PPE_MODEL_PATH}")
+            file_size = os.path.getsize(PPE_MODEL_PATH)
+            print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
+            
+            session_options = ort.SessionOptions()
+            session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            PPE_SESSION = ort.InferenceSession(
+                PPE_MODEL_PATH, 
+                sess_options=session_options,
+                providers=["CPUExecutionProvider"]
+            )
+            PPE_INPUT = PPE_SESSION.get_inputs()[0].name
+            
+            # Print model info
+            input_shape = PPE_SESSION.get_inputs()[0].shape
+            output_shape = PPE_SESSION.get_outputs()[0].shape
+            print(f"✓ ONNX PPE Model loaded successfully")
+            print(f"  Input name: {PPE_INPUT}, shape: {input_shape}")
+            print(f"  Output shape: {output_shape}")
+            return PPE_SESSION, PPE_INPUT
+    except Exception as e:
+        print(f"❌ Warning: Failed to load ONNX PPE model: {e}")
+        print("The application will continue without PPE detection.")
+        import traceback
+        traceback.print_exc()
+        PPE_SESSION = None
+        return None, None
 
 def run_cleaning_onnx(frame_bgr):
     """
@@ -119,7 +135,8 @@ def run_cleaning_onnx(frame_bgr):
     Each detection: {cls: class_id, score: confidence}
     Includes proper Letterboxing, Class-Aware NMS, and Coordinate Mapping.
     """
-    if CLEANING_SESSION is None:
+    session, input_name = get_cleaning_session()
+    if session is None:
         return []
     
     try:
@@ -158,7 +175,7 @@ def run_cleaning_onnx(frame_bgr):
         img = np.expand_dims(img, axis=0)
         
         # Run inference
-        outputs = CLEANING_SESSION.run(None, {CLEANING_INPUT: img})
+        outputs = session.run(None, {input_name: img})
         
         # Parse YOLOv8 output: [1, 8, 8400] -> [8400, 8]
         output = outputs[0]
@@ -259,7 +276,8 @@ def run_ppe_onnx(frame_bgr):
     """
     Run ONNX Runtime inference on a BGR frame and return detections for PPE.
     """
-    if PPE_SESSION is None:
+    session, input_name = get_ppe_session()
+    if session is None:
         return []
     
     try:
@@ -287,7 +305,7 @@ def run_ppe_onnx(frame_bgr):
         img = np.expand_dims(img, axis=0)
         
         # Run inference
-        outputs = PPE_SESSION.run(None, {PPE_INPUT: img})
+        outputs = session.run(None, {input_name: img})
         
         # Parse YOLOv8 output
         output = outputs[0]
