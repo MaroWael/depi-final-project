@@ -12,6 +12,7 @@ from PIL import Image
 from inference_sdk import InferenceHTTPClient
 from collections import defaultdict
 import json
+from ultralytics import YOLO
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -35,6 +36,13 @@ CLIENT = InferenceHTTPClient(
     api_url="https://detect.roboflow.com",
     api_key=API_KEY
 )
+
+# Initialize Cleaning Model
+try:
+    CLEANING_MODEL = YOLO("cleaning_surface.pt")
+except Exception as e:
+    print(f"Warning: Failed to load cleaning model: {e}")
+    CLEANING_MODEL = None
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
@@ -427,8 +435,40 @@ async def analyze_video(
     target_behaviors = ["eating", "face_touching", "smoking"]
     behavior_stats = {behavior: {"count": 0, "confidence_sum": 0.0} for behavior in target_behaviors}
     
+    # Initialize stats for cleaning issues
+    target_cleaning = ["rats", "insects", "dirty"]
+    cleaning_stats = {issue: {"count": 0, "confidence_sum": 0.0} for issue in target_cleaning}
+    
     # Use defaultdict for any other unexpected behaviors
     other_stats = defaultdict(lambda: {"count": 0, "confidence_sum": 0.0})
+
+    def process_detection(label, conf):
+        if not label:
+            return
+            
+        normalized_label = label.lower().replace("-", "_").replace(" ", "_")
+        
+        # Check behaviors
+        if normalized_label in behavior_stats:
+            behavior_stats[normalized_label]["count"] += 1
+            behavior_stats[normalized_label]["confidence_sum"] += conf
+            return
+
+        # Check cleaning issues
+        # Map various labels to the 3 main categories
+        if normalized_label in ["rat", "mouse", "rodent"]:
+            cleaning_stats["rats"]["count"] += 1
+            cleaning_stats["rats"]["confidence_sum"] += conf
+        elif normalized_label in ["insect", "cockroach", "fly", "ant", "bug", "beetle"]:
+            cleaning_stats["insects"]["count"] += 1
+            cleaning_stats["insects"]["confidence_sum"] += conf
+        elif "dirty" in normalized_label or "stain" in normalized_label or "trash" in normalized_label:
+            cleaning_stats["dirty"]["count"] += 1
+            cleaning_stats["dirty"]["confidence_sum"] += conf
+        else:
+            # Store other detections
+            other_stats[normalized_label]["count"] += 1
+            other_stats[normalized_label]["confidence_sum"] += conf
 
     try:
         while True:
@@ -446,30 +486,29 @@ async def analyze_video(
             frame_resized = cv2.resize(frame, RESIZE_DIM)
             frame_pil = Image.fromarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
 
+            # 1. Behavior Detection (Roboflow)
             try:
                 result = CLIENT.infer(frame_pil, model_id=MODEL_ID)
                 predictions = result.get("predictions", [])
+                for pred in predictions:
+                    process_detection(pred.get("class"), pred.get("confidence", 0.0))
             except Exception as e:
-                print(f"Error at frame {frame_count}: {e}")
-                continue
+                print(f"Error in behavior model at frame {frame_count}: {e}")
 
-            # Collect statistics
-            for pred in predictions:
-                label = pred.get("class")
-                conf = pred.get("confidence", 0.0)
-                
-                if label:
-                    # Normalize label (handle potential variations)
-                    normalized_label = label.lower().replace("-", "_").replace(" ", "_")
+            # 2. Cleaning Surface Detection (YOLO)
+            if CLEANING_MODEL:
+                try:
+                    # Run inference
+                    cleaning_results = CLEANING_MODEL(frame_resized, verbose=False)
                     
-                    if normalized_label in behavior_stats:
-                        behavior_stats[normalized_label]["count"] += 1
-                        behavior_stats[normalized_label]["confidence_sum"] += conf
-                    else:
-                        # Store other detections if needed, or map them
-                        # For now, we'll track them in other_stats
-                        other_stats[label]["count"] += 1
-                        other_stats[label]["confidence_sum"] += conf
+                    for r in cleaning_results:
+                        for box in r.boxes:
+                            cls_id = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            label = r.names[cls_id]
+                            process_detection(label, conf)
+                except Exception as e:
+                    print(f"Error in cleaning model at frame {frame_count}: {e}")
 
     finally:
         cap.release()
@@ -479,31 +518,35 @@ async def analyze_video(
     # -----------------------------
     final_stats = {}
     
-    # Process target behaviors
-    for behavior, stats in behavior_stats.items():
-        count = stats["count"]
-        avg_conf = round(stats["confidence_sum"] / count, 3) if count > 0 else 0.0
-        is_present = count >= 1
-        
-        final_stats[behavior] = {
-            "count": count,
-            "average_confidence": avg_conf,
-            "detected": is_present
-        }
-        
-    # Add other behaviors if any (optional, but good for debugging)
-    for behavior, stats in other_stats.items():
-        count = stats["count"]
-        avg_conf = round(stats["confidence_sum"] / count, 3) if count > 0 else 0.0
-        is_present = count >= 1
-        
-        final_stats[behavior] = {
-            "count": count,
-            "average_confidence": avg_conf,
-            "detected": is_present
-        }
+    # Helper to format stats
+    def format_stats(stats_dict):
+        for key, data in stats_dict.items():
+            count = data["count"]
+            avg_conf = round(data["confidence_sum"] / count, 3) if count > 0 else 0.0
+            is_present = count >= 1
+            
+            final_stats[key] = {
+                "count": count,
+                "average_confidence": avg_conf,
+                "detected": is_present
+            }
+
+    format_stats(behavior_stats)
+    format_stats(cleaning_stats)
+    format_stats(other_stats)
 
     final_stats["total_frames_processed"] = frame_count
+
+    # -----------------------------
+    # Determine Cleanliness Status
+    # -----------------------------
+    # User logic: is_clean is TRUE if any of rats, insects, or dirty are detected.
+    
+    has_rats = final_stats.get("rats", {}).get("detected", False)
+    has_insects = final_stats.get("insects", {}).get("detected", False)
+    is_dirty = final_stats.get("dirty", {}).get("detected", False)
+    
+    final_stats["is_clean"] = has_rats or has_insects or is_dirty
 
     # -----------------------------
     # 4. Save to DB
