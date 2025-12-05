@@ -40,9 +40,24 @@ CLIENT = InferenceHTTPClient(
 
 # Initialize ONNX Cleaning Model
 CLEANING_MODEL_PATH = "cleaning_surface.onnx"
-CLEANING_SESSION = ort.InferenceSession(CLEANING_MODEL_PATH, providers=["CPUExecutionProvider"])
-CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
+CLEANING_SESSION = None
+CLEANING_INPUT = None
 CLEAN_CLASSES = ["clean_surface", "dirty_surface", "Rats", "Insects"]
+
+try:
+    session_options = ort.SessionOptions()
+    session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    CLEANING_SESSION = ort.InferenceSession(
+        CLEANING_MODEL_PATH, 
+        sess_options=session_options,
+        providers=["CPUExecutionProvider"]
+    )
+    CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
+    print("✓ ONNX Cleaning Model loaded successfully")
+except Exception as e:
+    print(f"Warning: Failed to load ONNX cleaning model: {e}")
+    print("The application will continue without cleaning surface detection.")
+    CLEANING_SESSION = None
 
 def run_cleaning_onnx(frame_bgr):
     img = cv2.resize(frame_bgr, (640, 640))
