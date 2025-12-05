@@ -78,13 +78,45 @@ except Exception as e:
     CLEANING_SESSION = None
 
 def run_cleaning_onnx(frame_bgr):
+    """
+    Run ONNX Runtime inference on a BGR frame and return detections.
+    Each detection: {cls: class_id, score: confidence}
+    Includes proper Letterboxing, Class-Aware NMS, and Coordinate Mapping.
+    """
+    if CLEANING_SESSION is None:
+        return []
+    
     try:
-        # Get original frame dimensions for scaling boxes
+        # Get original frame dimensions
         orig_h, orig_w = frame_bgr.shape[:2]
         
-        # Preprocess frame
-        img = cv2.resize(frame_bgr, (640, 640))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # -----------------------------
+        # 1. Letterbox Preprocessing
+        # -----------------------------
+        # Calculate scale factor (min scale to fit)
+        scale = min(640 / orig_w, 640 / orig_h)
+        
+        # New dimensions
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        
+        # Resize image
+        img_resized = cv2.resize(frame_bgr, (new_w, new_h))
+        
+        # Create canvas (640x640) with gray padding (114)
+        canvas = np.full((640, 640, 3), 114, dtype=np.uint8)
+        
+        # Calculate padding offsets (center the image)
+        dw = (640 - new_w) // 2
+        dh = (640 - new_h) // 2
+        
+        # Place resized image on canvas
+        canvas[dh:dh+new_h, dw:dw+new_w] = img_resized
+        
+        # -----------------------------
+        # 2. Prepare for Model
+        # -----------------------------
+        img = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))
         img = np.expand_dims(img, axis=0)
@@ -92,32 +124,93 @@ def run_cleaning_onnx(frame_bgr):
         # Run inference
         outputs = CLEANING_SESSION.run(None, {CLEANING_INPUT: img})
         
-        # Parse output - YOLOv8 format
+        # Parse YOLOv8 output: [1, 8, 8400] -> [8400, 8]
         output = outputs[0]
-        
-        # Transpose to (8400, 8) if needed
         if len(output.shape) == 3:
-            output = output[0].T  # (8, 8400) -> (8400, 8)
+            output = output[0].T  # [8, 8400] -> [8400, 8]
         
-        detections = []
-        
-        # Scale factors for bounding boxes
-        scale_x = orig_w / 640
-        scale_y = orig_h / 640
+        # -----------------------------
+        # 3. Process Detections
+        # -----------------------------
+        boxes = []
+        scores = []
+        class_ids = []
         
         for detection in output:
-            # First 4 values are box coordinates (x_center, y_center, width, height)
-            # Remaining values are class confidences
-            x_center, y_center, width, height = detection[:4]
+            # Extract class scores (skip first 4 bbox coordinates)
             class_scores = detection[4:]
-            
-            # Get the class with max confidence
             cls_id = int(np.argmax(class_scores))
             confidence = float(class_scores[cls_id])
             
             # Filter by confidence threshold
-            if confidence > 0.25:
-                detections.append({"cls": cls_id, "score": confidence})
+            if confidence > CONFIDENCE_THRESHOLD:
+                # Get bbox coordinates (relative to 640x640 canvas)
+                x_center, y_center, width, height = detection[:4]
+                
+                # Convert to top-left corner format (x, y, w, h) for NMS
+                x = x_center - width / 2
+                y = y_center - height / 2
+                
+                boxes.append([x, y, width, height])
+                scores.append(confidence)
+                class_ids.append(cls_id)
+        
+        # -----------------------------
+        # 4. Class-Aware NMS
+        # -----------------------------
+        # Offset boxes by class_id * max_wh so NMS is applied per-class
+        nms_boxes = []
+        max_wh = 4096 # larger than 640
+        
+        for i, box in enumerate(boxes):
+            x, y, w, h = box
+            c = class_ids[i]
+            nms_boxes.append([x + c * max_wh, y + c * max_wh, w, h])
+            
+        # Apply NMS
+        indices = cv2.dnn.NMSBoxes(
+            nms_boxes, 
+            scores, 
+            score_threshold=CONFIDENCE_THRESHOLD,
+            nms_threshold=0.7  # Ultralytics default IoU
+        )
+        
+        detections = []
+        if len(indices) > 0:
+            for i in indices.flatten():
+                # Retrieve original box (from canvas coords)
+                x, y, w, h = boxes[i]
+                
+                # -----------------------------
+                # 5. Coordinate Mapping (Canvas -> Original)
+                # -----------------------------
+                # Remove padding
+                x -= dw
+                y -= dh
+                
+                # Scale back to original size
+                x /= scale
+                y /= scale
+                w /= scale
+                h /= scale
+                
+                # Convert to x1, y1, x2, y2
+                x1 = int(x)
+                y1 = int(y)
+                x2 = int(x + w)
+                y2 = int(y + h)
+                
+                # Clip to image bounds
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(orig_w, x2)
+                y2 = min(orig_h, y2)
+                
+                detections.append({
+                    "cls": class_ids[i],
+                    "score": scores[i],
+                    "bbox": [x1, y1, x2, y2]
+                })
         
         return detections
     except Exception as e:
@@ -606,145 +699,11 @@ async def analyze_behavior(
         "created_at": report["created_at"]
     }
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Form
-from fastapi.responses import FileResponse
-from schemas import SignupRequest, LoginRequest, LoginResponse, UserResponse, UpdateUserRequest, VideoReportResponse
-from models import User, LoginHistory, VideoReport
-from auth import hash_password, verify_password, create_access_token, get_current_admin, get_current_user
-from datetime import datetime
-import os
-import uuid
-from pathlib import Path
-import cv2
-from PIL import Image
-from inference_sdk import InferenceHTTPClient
-from collections import defaultdict
-import json
-import onnxruntime as ort
-import numpy as np
-
-# NEW: ultralytics YOLO import
-from ultralytics import YOLO
-
-router = APIRouter(prefix="/auth", tags=["Authentication"])
-
-# Create images directory if it doesn't exist
-IMAGES_DIR = Path("images")
-IMAGES_DIR.mkdir(exist_ok=True)
-
-# Create videos directory if it doesn't exist
-VIDEOS_DIR = Path("videos")
-VIDEOS_DIR.mkdir(exist_ok=True)
-
 # -----------------------------
-# API & MODEL CONFIG
+# Cleaning Model Configuration
 # -----------------------------
-MODEL_ID = "saldjs-eodej/1"
-API_KEY = "f50xHu5kMJ54A1ERJdnX"
-FRAME_SKIP = 5
-RESIZE_DIM = (640, 640)
-
-CLIENT = InferenceHTTPClient(
-    api_url="https://detect.roboflow.com",
-    api_key=API_KEY
-)
-
-# -----------------------------
-# ONNX Cleaning Model (kept as-is)
-# -----------------------------
-CLEANING_MODEL_PATH = "cleaning_surface.onnx"
-CLEANING_SESSION = None
-CLEANING_INPUT = None
-CLEAN_CLASSES = ["clean_surface", "dirty_surface", "Rats", "Insects"]
-
-try:
-    import os
-    if not os.path.exists(CLEANING_MODEL_PATH):
-        print(f"❌ ONNX model file not found at: {CLEANING_MODEL_PATH}")
-        print(f"Current directory: {os.getcwd()}")
-        print(f"Files in current directory: {os.listdir('.')}")
-    else:
-        print(f"✓ ONNX model file found at: {CLEANING_MODEL_PATH}")
-        file_size = os.path.getsize(CLEANING_MODEL_PATH)
-        print(f"  Model file size: {file_size / (1024*1024):.2f} MB")
-        
-        session_options = ort.SessionOptions()
-        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        CLEANING_SESSION = ort.InferenceSession(
-            CLEANING_MODEL_PATH, 
-            sess_options=session_options,
-            providers=["CPUExecutionProvider"]
-        )
-        CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
-        
-        # Print model info
-        input_shape = CLEANING_SESSION.get_inputs()[0].shape
-        output_shape = CLEANING_SESSION.get_outputs()[0].shape
-        print(f"✓ ONNX Cleaning Model loaded successfully")
-        print(f"  Input name: {CLEANING_INPUT}, shape: {input_shape}")
-        print(f"  Output shape: {output_shape}")
-except Exception as e:
-    print(f"❌ Warning: Failed to load ONNX cleaning model: {e}")
-    print("The application will continue without cleaning surface detection.")
-    import traceback
-    traceback.print_exc()
-    CLEANING_SESSION = None
-
-def run_cleaning_onnx(frame_bgr):
-    try:
-        # Get original frame dimensions for scaling boxes
-        orig_h, orig_w = frame_bgr.shape[:2]
-        
-        # Preprocess frame
-        img = cv2.resize(frame_bgr, (640, 640))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img.astype(np.float32) / 255.0
-        img = np.transpose(img, (2, 0, 1))
-        img = np.expand_dims(img, axis=0)
-        
-        # Run inference
-        outputs = CLEANING_SESSION.run(None, {CLEANING_INPUT: img})
-        
-        # Parse output - YOLOv8 format
-        output = outputs[0]
-        
-        # Transpose to (8400, 8) if needed
-        if len(output.shape) == 3:
-            output = output[0].T  # (8, 8400) -> (8400, 8)
-        
-        detections = []
-        
-        # Scale factors for bounding boxes
-        scale_x = orig_w / 640
-        scale_y = orig_h / 640
-        
-        for detection in output:
-            # First 4 values are box coordinates (x_center, y_center, width, height)
-            # Remaining values are class confidences
-            x_center, y_center, width, height = detection[:4]
-            class_scores = detection[4:]
-            
-            # Get the class with max confidence
-            cls_id = int(np.argmax(class_scores))
-            confidence = float(class_scores[cls_id])
-            
-            # Filter by confidence threshold
-            if confidence > 0.25:
-                detections.append({"cls": cls_id, "score": confidence})
-        
-        return detections
-    except Exception as e:
-        print(f"[ONNX] Error in run_cleaning_onnx: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-# -----------------------------
-# NEW: YOLO Cleaning Model (Option A: add YOLO alongside ONNX)
-# -----------------------------
-CLEAN_MODEL_PATH = "cleaning_surface.onnx"  # change if needed
 CONFIDENCE_THRESHOLD = 0.25
-FRAME_SKIP_CLEANING = 1  # process every frame (same as your script)
+FRAME_SKIP_CLEANING = 1  # process every frame
 
 # Colors for visualization (BGR)
 CLASS_COLORS = {
@@ -753,76 +712,6 @@ CLASS_COLORS = {
     2: (0, 0, 255),      # Rats - Red
     3: (255, 0, 255)     # Insects - Magenta
 }
-
-try:
-    print("Loading Cleaning YOLO model (ultralytics)...")
-    CLEAN_MODEL = YOLO(CLEAN_MODEL_PATH)
-    print("✓ Cleaning YOLO model loaded successfully")
-except Exception as e:
-    print(f"❌ Error loading YOLO model at {CLEAN_MODEL_PATH}: {e}")
-    CLEAN_MODEL = None
-
-def run_cleaning_yolo(frame_bgr):
-    """
-    Run ultralytics YOLO model on a BGR frame and return detections.
-    Each detection: {class_id, class_name, confidence, bbox}
-    """
-    if CLEAN_MODEL is None:
-        return []
-
-    try:
-        # ultralytics accepts numpy images (BGR/RGB) — pass frame directly
-        results = CLEAN_MODEL(frame_bgr, conf=CONFIDENCE_THRESHOLD, verbose=False)
-        detections = []
-
-        for result in results:
-            boxes = getattr(result, "boxes", None)
-            if boxes is None:
-                continue
-
-            for box in boxes:
-                # ultralytics box attributes: cls, conf, xyxy
-                try:
-                    cls_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-                    if 0 <= cls_id < len(CLEAN_CLASSES):
-                        detections.append({
-                            "class_id": cls_id,
-                            "class_name": CLEAN_CLASSES[cls_id],
-                            "confidence": conf,
-                            "bbox": (int(x1), int(y1), int(x2), int(y2))
-                        })
-                except Exception:
-                    # Skip malformed box
-                    continue
-
-        return detections
-
-    except Exception as e:
-        print(f"[YOLO] Error in run_cleaning_yolo: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-def draw_detections(frame, detections):
-    """Optional: draw bounding boxes and labels on frame (BGR image)."""
-    for det in detections:
-        cls_id = det["class_id"]
-        cls_name = det["class_name"]
-        conf = det["confidence"]
-        x1, y1, x2, y2 = det["bbox"]
-
-        color = CLASS_COLORS.get(cls_id, (255, 255, 255))
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-        label = f"{cls_name}: {conf:.2f}"
-        (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(frame, (x1, y1 - label_h - 10), (x1 + label_w, y1), color, -1)
-        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-
-    return frame
 
 # ----------------------------- existing routes (signup, login, etc.) mostly unchanged
 # Keep your original signup/login/get_all_chiefs/update_user/delete_user/get_user_image
@@ -1310,7 +1199,7 @@ async def analyze_behavior(
     }
 
 # -----------------------------
-# REPLACED: /analyze-cleaning route (YOLO-based) - Option A
+# /analyze-cleaning route (ONNX-based)
 # -----------------------------
 @router.post("/analyze-cleaning", response_model=VideoReportResponse)
 async def analyze_cleaning(
@@ -1318,13 +1207,12 @@ async def analyze_cleaning(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Upload a video and analyze cleaning/hygiene issues using YOLO model.
+    Upload a video and analyze cleaning/hygiene issues using ONNX model.
     Detects: clean_surface, dirty_surface, Rats, Insects
 
-    This route uses the ultralytics YOLO model if available (CLEAN_MODEL).
-    If CLEAN_MODEL is not loaded, it will return 503.
+    This route uses ONNX Runtime for efficient inference.
     """
-    if CLEAN_MODEL is None:
+    if CLEANING_SESSION is None:
         # If user wants ONNX fallback, they can re-enable run_cleaning_onnx logic.
         raise HTTPException(
             status_code=503,
@@ -1371,24 +1259,22 @@ async def analyze_cleaning(
             if frame_count % FRAME_SKIP_CLEANING != 0:
                 continue
 
-            # Optionally: resize to a reasonable size for speed (YOLO will handle scale)
-            # frame_for_model = cv2.resize(frame, RESIZE_DIM)
-            frame_for_model = frame
-
-            # Run YOLO detection
+            # Run ONNX detection
             try:
-                detections = run_cleaning_yolo(frame_for_model)
+                detections = run_cleaning_onnx(frame)
 
                 for det in detections:
-                    cls_name = det["class_name"]
-                    conf = det["confidence"]
-
-                    # Update counts and confidence sums
-                    class_counts[cls_name] += 1
-                    class_confidences[cls_name] += conf
+                    cls_id = det["cls"]
+                    conf = det["score"]
+                    
+                    if 0 <= cls_id < len(CLEAN_CLASSES):
+                        cls_name = CLEAN_CLASSES[cls_id]
+                        # Update counts and confidence sums
+                        class_counts[cls_name] += 1
+                        class_confidences[cls_name] += conf
 
             except Exception as e:
-                print(f"YOLO cleaning model error at frame {frame_count}: {e}")
+                print(f"ONNX cleaning model error at frame {frame_count}: {e}")
 
     finally:
         cap.release()
