@@ -10,7 +10,8 @@ pydantic-settings==2.1.0
 python-dotenv==1.0.0
 email-validator==2.1.0
 requests==2.31.0
-opencv-python-headless
+opencv-python-headless==4.5.5.64
 inference-sdk
 Pillow
-ultralytics
+onnxruntime==1.18.0
+numpy==1.26.0

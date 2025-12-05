@@ -12,7 +12,8 @@ from PIL import Image
 from inference_sdk import InferenceHTTPClient
 from collections import defaultdict
 import json
-from ultralytics import YOLO
+import onnxruntime as ort
+import numpy as np
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -37,12 +38,44 @@ CLIENT = InferenceHTTPClient(
     api_key=API_KEY
 )
 
-# Initialize Cleaning Model
-try:
-    CLEANING_MODEL = YOLO("cleaning_surface.pt")
-except Exception as e:
-    print(f"Warning: Failed to load cleaning model: {e}")
-    CLEANING_MODEL = None
+# Initialize ONNX Cleaning Model
+CLEANING_MODEL_PATH = "cleaning_surface.onnx"
+CLEANING_SESSION = ort.InferenceSession(CLEANING_MODEL_PATH, providers=["CPUExecutionProvider"])
+CLEANING_INPUT = CLEANING_SESSION.get_inputs()[0].name
+CLEAN_CLASSES = ["clean_surface", "dirty_surface", "Rats", "Insects"]
+
+def run_cleaning_onnx(frame_bgr):
+    img = cv2.resize(frame_bgr, (640, 640))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = img.astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, axis=0)
+    outputs = CLEANING_SESSION.run(None, {CLEANING_INPUT: img})
+    
+    # YOLOv8 ONNX output format: (1, 8, 8400) for 4 classes
+    # Format: [x, y, w, h, class0_conf, class1_conf, class2_conf, class3_conf]
+    output = outputs[0]
+    
+    # Transpose to (8400, 8) if needed
+    if len(output.shape) == 3:
+        output = output[0].T  # (8, 8400) -> (8400, 8)
+    
+    detections = []
+    
+    for detection in output:
+        # First 4 values are box coordinates (x, y, w, h)
+        # Remaining values are class confidences
+        class_scores = detection[4:]
+        
+        # Get the class with max confidence
+        cls_id = int(np.argmax(class_scores))
+        confidence = float(class_scores[cls_id])
+        
+        # Filter by confidence threshold
+        if confidence > 0.25:  # Lower threshold for better detection
+            detections.append({"cls": cls_id, "score": confidence})
+    
+    return detections
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
@@ -495,20 +528,18 @@ async def analyze_video(
             except Exception as e:
                 print(f"Error in behavior model at frame {frame_count}: {e}")
 
-            # 2. Cleaning Surface Detection (YOLO)
-            if CLEANING_MODEL:
+            # 2. Cleaning Surface Detection (ONNX)
+            if CLEANING_SESSION:
                 try:
-                    # Run inference
-                    cleaning_results = CLEANING_MODEL(frame_resized, verbose=False)
-                    
-                    for r in cleaning_results:
-                        for box in r.boxes:
-                            cls_id = int(box.cls[0])
-                            conf = float(box.conf[0])
-                            label = r.names[cls_id]
+                    detections = run_cleaning_onnx(frame_resized)
+                    for det in detections:
+                        cls_id = det["cls"]
+                        conf = det["score"]
+                        if 0 <= cls_id < len(CLEAN_CLASSES):
+                            label = CLEAN_CLASSES[cls_id]
                             process_detection(label, conf)
                 except Exception as e:
-                    print(f"Error in cleaning model at frame {frame_count}: {e}")
+                    print(f"ONNX cleaning model error at frame {frame_count}: {e}")
 
     finally:
         cap.release()
@@ -540,13 +571,13 @@ async def analyze_video(
     # -----------------------------
     # Determine Cleanliness Status
     # -----------------------------
-    # User logic: is_clean is TRUE if any of rats, insects, or dirty are detected.
+    # is_clean is FALSE if any of rats, insects, or dirty are detected
     
     has_rats = final_stats.get("rats", {}).get("detected", False)
     has_insects = final_stats.get("insects", {}).get("detected", False)
     is_dirty = final_stats.get("dirty", {}).get("detected", False)
     
-    final_stats["is_clean"] = has_rats or has_insects or is_dirty
+    final_stats["is_clean"] = not (has_rats or has_insects or is_dirty)
 
     # -----------------------------
     # 4. Save to DB
