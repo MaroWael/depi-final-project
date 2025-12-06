@@ -4,10 +4,10 @@ from contextlib import contextmanager
 
 # Database configuration
 DB_CONFIG = {
-    "host": "serverless-us-east-1.sysp0000.db1.skysql.com",
-    "port": 4014,
-    "user": "dbpwf12245931",
-    "password": "CXMAyWE8Lqa5yxzy{1o81d",
+    "host": "serverless-eu-west-3.sysp0000.db1.skysql.com",
+    "port": 4027,
+    "user": "dbpwf06347787",
+    "password": "e3oQXYe]tCUWOpLGA0nGST",
     "database": "ai_db"
 }
 
