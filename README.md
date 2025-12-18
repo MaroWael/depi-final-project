@@ -1,3 +1,12 @@
+---
+title: FastAPI ONNX API
+emoji: 🚀
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # FastAPI Authentication System with MySQL
 
 A complete authentication system built with FastAPI and MySQL, featuring user registration, login, and login history tracking.
