@@ -7,8 +7,8 @@ import time
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Authentication API",
-    description="FastAPI Authentication System with MySQL",
+    title="Safety & Hygiene Monitoring API",
+    description="API for Video Analysis, PPE Detection, and Hygiene Monitoring",
     version="1.0.0"
 )
 
@@ -23,6 +23,20 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth_router)
+
+@app.get("/", tags=["Root"])
+async def root():
+    return {
+        "message": "Welcome to the Safety & Hygiene Monitoring API",
+        "docs": "/docs",
+        "endpoints": {
+            "signup": "/signup",
+            "login": "/login",
+            "analyze_behavior": "/analyze-behavior",
+            "analyze_cleaning": "/analyze-cleaning",
+            "analyze_ppe": "/analyze-ppe"
+        }
+    }
 
 @app.on_event("startup")
 async def startup_event():
@@ -56,19 +70,6 @@ async def startup_event():
     thread = threading.Thread(target=load_models_background, daemon=True)
     thread.start()
     print("--- Startup Event End (Background thread started) ---")
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Authentication API",
-        "version": "1.0.0",
-        "endpoints": {
-            "signup": "/auth/signup (POST) - Admin only",
-            "login": "/auth/login (POST)",
-            "docs": "/docs"
-        }
-    }
 
 @app.get("/health")
 async def health_check():

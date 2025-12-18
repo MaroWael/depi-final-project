@@ -15,7 +15,7 @@ import json
 import onnxruntime as ort
 import numpy as np
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter(tags=["Safety & Hygiene Operations"])
 
 # Create images directory if it doesn't exist
 IMAGES_DIR = Path("images")
