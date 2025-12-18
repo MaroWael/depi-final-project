@@ -28,8 +28,8 @@ VIDEOS_DIR.mkdir(exist_ok=True)
 # -----------------------------
 # API & MODEL CONFIG
 # -----------------------------
-MODEL_ID = "saldjs-eodej/1"
-API_KEY = "f50xHu5kMJ54A1ERJdnX"
+MODEL_ID = "saldjs-37fpo/1"        
+API_KEY = "RMA4vIMCvmQsvANyobNg"
 FRAME_SKIP = 5
 RESIZE_DIM = (640, 640)
 
